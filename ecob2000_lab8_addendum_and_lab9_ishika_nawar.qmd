@@ -1,0 +1,417 @@
+---
+title: "ecob2000_lab8_addendum_ishika_nawar"
+format: html
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+
+```{r}
+1 + 1
+```
+
+You can add options to executable code like this
+
+```{r}
+#| echo: false
+2 * 2
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(AER)
+library(haven)
+library(car)
+library(sandwich)
+library(standardize)
+```
+
+```{r}
+setwd("~/Documents/R Projects/ecob2000_lab6")
+load("ACS2021_couples.Rdata")
+attach(acs2021_couples)
+summary(acs2021_couples)
+```
+
+```{r}
+# Establishing the subset
+trad_data <- acs2021_couples %>%
+  filter(SEX == "Female", h_sex == 1, RELATE == 2, AGE >= 18, h_age >= 18)
+
+#Establishing the dependent dummy variable
+
+trad_data$age_diff <- trad_data$AGE - trad_data$h_age
+
+trad_data$he_more_than_5yrs_than_her <- as.numeric(trad_data$age_diff < -5)
+```
+
+```{r}
+table(trad_data$he_more_than_5yrs_than_her,cut(trad_data$age_diff,c(-100,-10, -5, 0, 5, 10, 100)))
+mean(trad_data$he_more_than_5yrs_than_her)
+```
+
+```{r}
+# Establishing dummies for independent variable of REGION. Since the couple lives in the same household, it will be the same variable for both spouses, so only one set of dummies.
+
+trad_data$REGION_f <- factor(trad_data$REGION,
+                             levels = c(11, 12, 21, 22, 31, 32, 33, 41, 42),
+                             labels = c("New England", "Middle Atlantic", "East North Central",
+                                        "West North Central", "South Atlantic", "East South Central",
+                                        "West South Central", "Mountain", "Pacific"))
+trad_data$REGION_f <- relevel(trad_data$REGION_f, ref = "South Atlantic")
+
+#Establishing dummies for independent variable of Race. For the wife (RACE) and husband (h_race), base = White.
+race_labels <- c("White", "Black", "American Indian or Alaska Native",
+                 "Chinese", "Japanese", "Other Asian or Pacific Islander",
+                 "Other race", "Two races", "Three or more races")
+
+trad_data$wife_race <- factor(as.numeric(as.character(trad_data$RACE)),
+                              levels = 1:9, labels = race_labels)
+trad_data$hus_race  <- factor(as.numeric(as.character(trad_data$h_race)),
+                              levels = 1:9, labels = race_labels)
+
+class(trad_data$wife_race)  
+
+# Establishing dummies for independent variable  of Education Levels. For the wife (EDUC) and husband (h_educ), 5 categories. Base = less than high school. (3 yrs college has 0 obs in this file.)
+educ_cat <- function(x) {
+  x <- as.character(x)
+  case_when(
+    x == "Grade 12"                                              ~ "HS",
+    x %in% c("1 year of college", "2 years of college",
+             "3 years of college")                               ~ "Some college",
+    x == "4 years of college"                                    ~ "College",
+    x == "5+ years of college"                                   ~ "Advanced degree",
+    TRUE                                                         ~ "Less than HS"
+  )
+}
+lv <- c("Less than HS", "HS", "Some college", "College", "Advanced degree")
+trad_data$wife_educ <- factor(educ_cat(trad_data$EDUC),   levels = lv)
+trad_data$hus_educ  <- factor(educ_cat(trad_data$h_educ), levels = lv)
+
+trad_data <- trad_data %>% mutate(
+  wife_hs       = as.numeric(wife_educ == "HS"),
+  wife_somecoll = as.numeric(wife_educ == "Some college"),
+  wife_college  = as.numeric(wife_educ == "College"),
+  wife_advdeg   = as.numeric(wife_educ == "Advanced degree"),
+  hus_hs        = as.numeric(hus_educ  == "HS"),
+  hus_somecoll  = as.numeric(hus_educ  == "Some college"),
+  hus_college   = as.numeric(hus_educ  == "College"),
+  hus_advdeg    = as.numeric(hus_educ  == "Advanced degree")
+)
+```
+
+```{r}
+dat_use <- trad_data
+```
+
+```{r}
+# Turning every x-factor into 0/1 dummies, in one step:
+
+X_mat <- model.matrix(~ REGION_f + wife_race + hus_race + wife_educ + hus_educ,data = dat_use)[, -1]
+```
+
+```{r}
+# Cleaning up the column names so they work in formulas and read nicely
+colnames(X_mat) <- make.names(colnames(X_mat))
+colnames(X_mat) <- sub("^REGION_f", "Reg_", colnames(X_mat))
+colnames(X_mat) <- sub("^wife_race", "W_race_", colnames(X_mat))
+colnames(X_mat) <- sub("^hus_race",  "H_race_", colnames(X_mat))
+colnames(X_mat) <- sub("^wife_educ", "W_educ_", colnames(X_mat))
+colnames(X_mat) <- sub("^hus_educ",  "H_educ_", colnames(X_mat))
+
+colnames(X_mat)
+```
+
+```{r}
+# Putting Y and X dummies together
+dat_for_analysis_sub <- data.frame(
+  he_more_than_5yrs_than_her = dat_use$he_more_than_5yrs_than_her,
+  X_mat)
+```
+
+```{r}
+# Checking for empty dummies: it prints to zero :D
+sum(colSums(X_mat) == 0)
+```
+
+```{r}
+# Training and Test Split
+set.seed(654321)
+NN <- nrow(dat_for_analysis_sub)
+
+train_frac <- 0.10
+restrict_1 <- (runif(NN) < train_frac)
+summary(restrict_1)
+
+dat_train <- subset(dat_for_analysis_sub,  restrict_1)
+dat_test  <- subset(dat_for_analysis_sub, !restrict_1)
+
+# Checking again: it's zero :D
+sum(colSums(dat_train) == 0)
+```
+
+```{r}
+# Checking the outcome shares are similar in train and test:
+mean(dat_train$he_more_than_5yrs_than_her)
+mean(dat_test$he_more_than_5yrs_than_her)
+
+# They're approximately similar: 1) ~0.189; 2) ~0.187
+```
+
+```{r}
+# Standardizing using training data 
+formula_sobj <- reformulate(names(dat_for_analysis_sub)[-1],
+                            response = "he_more_than_5yrs_than_her")
+
+sobj <- standardize(formula_sobj, dat_train, family = binomial)
+
+s_dat_test <- predict(sobj, dat_test)
+```
+
+```{r}
+# OLS (linear probability model): fit on training, evaluate on test:
+model_lpm1 <- lm(sobj$formula, data = sobj$data)
+summary(model_lpm1)
+
+pred_vals_lpm   <- predict(model_lpm1, s_dat_test)
+pred_model_lpm1 <- (pred_vals_lpm > mean(pred_vals_lpm))
+table(pred = pred_model_lpm1, true = dat_test$he_more_than_5yrs_than_her)
+```
+
+```{r}
+# Logit: fit on training, evaluate on test:
+model_logit1 <- glm(sobj$formula, family = binomial, data = sobj$data)
+summary(model_logit1)
+
+pred_vals_logit   <- predict(model_logit1, s_dat_test, type = "response")
+pred_model_logit1 <- (pred_vals_logit > mean(pred_vals_logit))
+table(pred = pred_model_logit1, true = dat_test$he_more_than_5yrs_than_her)
+```
+
+```{r}
+library(randomForest)
+library(e1071)
+library(glmnet)
+library(spikeslab)
+```
+
+```{r}
+# Lab 9 Part 1 - Splitting the Data
+trad_data$BA_plus <- trad_data$wife_college + trad_data$wife_advdeg
+table(trad_data$BA_plus)
+```
+
+```{r}
+# Whole dataset, full interaction)
+model_lpm_v1 <- lm(he_more_than_5yrs_than_her ~ BA_plus + AGE + I(AGE * BA_plus), data = trad_data)
+summary(model_lpm_v1)
+```
+
+```{r}
+# Two subsets, rather than the whole dataset:
+dat_use_BAplus <- trad_data %>% filter(as.logical(BA_plus))
+dat_use_ltBA   <- trad_data %>% filter(!as.logical(BA_plus))
+
+model_lpm_v1_BAplus <- lm(he_more_than_5yrs_than_her ~ AGE, data = dat_use_BAplus)
+model_lpm_v1_ltBA   <- lm(he_more_than_5yrs_than_her ~ AGE, data = dat_use_ltBA)
+summary(model_lpm_v1_BAplus)
+summary(model_lpm_v1_ltBA)
+```
+
+```{r}
+# Seeing that the two approaches are identical
+b <- coef(model_lpm_v1)
+rbind(full_model = c(ltBA_int   = unname(b["(Intercept)"]),
+               ltBA_slope = unname(b["AGE"]),
+               BA_int     = unname(b["(Intercept)"] + b["BA_plus"]),
+               BA_slope   = unname(b["AGE"] + b["I(AGE * BA_plus)"])),
+split_models = c(coef(model_lpm_v1_ltBA), coef(model_lpm_v1_BAplus))
+```
+
+```{r}
+# Predictions for every person are identical
+pred_full  <- predict(model_lpm_v1, trad_data)
+pred_split <- ifelse(trad_data$BA_plus == 1,
+                     predict(model_lpm_v1_BAplus, trad_data),
+                     predict(model_lpm_v1_ltBA,   trad_data))
+all.equal(unname(pred_full), unname(pred_split))
+```
+
+```{r}
+# The Setup to be Shared by All the Machine-Learning Models
+y_name  <- "he_more_than_5yrs_than_her"
+x_names <- setdiff(names(sobj$data), y_name)
+stopifnot(all(x_names %in% names(s_dat_test)))
+
+X_train <- data.matrix(sobj$data[, x_names])
+y_train <- sobj$data[[y_name]]
+X_test  <- data.matrix(s_dat_test[, x_names])
+y_test  <- dat_test[[y_name]]
+base_rate <- mean(y_test)
+
+to_lgl <- function(p) if (is.logical(p)) p else as.numeric(as.character(p)) == 1
+
+eval_model <- function(flag, truth, name) {
+  flag <- to_lgl(flag)
+  tp <- sum(flag & truth == 1);  fp <- sum(flag & truth == 0)
+  fn <- sum(!flag & truth == 1); tn <- sum(!flag & truth == 0)
+  data.frame(model = name,
+             accuracy  = (tp + tn) / length(truth),
+             recall    = tp / (tp + fn),
+             precision = ifelse(tp + fp > 0, tp / (tp + fp), NA),
+             flagged = tp + fp, TP = tp, FP = fp, FN = fn, TN = tn)
+}
+cut_mean <- function(score) score > mean(score)   # same mean cutoff as before
+
+results <- rbind(
+  eval_model(cut_mean(pred_vals_lpm),   y_test, "OLS (mean cutoff)"),
+  eval_model(cut_mean(pred_vals_logit), y_test, "Logit (mean cutoff)")
+)
+```
+
+```{r}
+# PART 3. Random forest
+set.seed(54321)
+model_randFor <- randomForest(as.factor(he_more_than_5yrs_than_her) ~ .,
+                              data = sobj$data, importance = TRUE,
+                              ntree = 200)
+print(model_randFor)               # confusion matrix here is within the training data (OOB)
+round(importance(model_randFor), 2)
+varImpPlot(model_randFor)
+
+# (a) The lab's default: majority-vote class prediction on the TEST data
+pred_rf_class <- predict(model_randFor, s_dat_test)
+table(pred = pred_rf_class, true = y_test)
+
+# (b) Same mean-cutoff rule as the OLS and logit, using predicted probabilities
+rf_prob <- predict(model_randFor, s_dat_test, type = "prob")[, "1"]
+results <- rbind(results,
+                 eval_model(pred_rf_class,      y_test, "Random forest (majority vote)"),
+                 eval_model(cut_mean(rf_prob),  y_test, "Random forest (mean cutoff)"))
+```
+
+```{r}
+# PART 4. Support vector machine
+set.seed(54321)
+svm_n      <- 10000
+svm_test_n <- 50000
+svm_idx    <- sample(nrow(sobj$data), min(svm_n, nrow(sobj$data)))
+svm_t_idx  <- sample(nrow(s_dat_test), min(svm_test_n, nrow(s_dat_test)))
+
+svm.model <- svm(as.factor(he_more_than_5yrs_than_her) ~ .,
+                 data = sobj$data[svm_idx, ], cost = 1, gamma = 0.1)
+
+# (a) default class prediction
+svm.pred <- predict(svm.model, s_dat_test[svm_t_idx, ])
+table(pred = svm.pred, true = y_test[svm_t_idx])
+
+# (b) mean cutoff on the decision value.
+svm_dec <- as.numeric(attr(predict(svm.model, s_dat_test[svm_t_idx, ],
+                                   decision.values = TRUE), "decision.values"))
+if (cor(svm_dec, pred_vals_logit[svm_t_idx]) < 0) svm_dec <- -svm_dec
+results <- rbind(results,
+                 eval_model(svm.pred,          y_test[svm_t_idx], "SVM (class, 50k test sample)"),
+                 eval_model(cut_mean(svm_dec), y_test[svm_t_idx], "SVM (mean cutoff, 50k test sample)"))
+```
+
+```{r}
+# PART 5. Elastic net (LASSO + ridge)
+model1_elasticnet <- glmnet(X_train, y_train)         
+print(model1_elasticnet)
+plot(model1_elasticnet, label = TRUE)
+
+set.seed(54321)
+foldid <- sample(rep(1:10, length.out = nrow(X_train))) 
+cvmodel1_elasticnet <- cv.glmnet(X_train, y_train, foldid = foldid)
+cvmodel1_elasticnet$lambda.min
+log(cvmodel1_elasticnet$lambda.min)
+coef(cvmodel1_elasticnet, s = "lambda.min")  
+
+pred1_elasnet <- as.numeric(predict(cvmodel1_elasticnet, newx = X_test, s = "lambda.min"))
+results <- rbind(results,
+                 eval_model(cut_mean(pred1_elasnet), y_test, "LASSO (alpha=1, mean cutoff)"))
+
+# Trying other alphas (0 = ridge, 1 = LASSO) and keep the one with the lowest CV error
+alphas  <- c(0, 0.25, 0.5, 0.75, 1)
+cv_list <- lapply(alphas, function(a) cv.glmnet(X_train, y_train, alpha = a, foldid = foldid))
+data.frame(alpha = alphas, cv_error = sapply(cv_list, function(m) min(m$cvm)))
+best <- which.min(sapply(cv_list, function(m) min(m$cvm)))
+pred_en_best <- as.numeric(predict(cv_list[[best]], newx = X_test, s = "lambda.min"))
+results <- rbind(results,
+                 eval_model(cut_mean(pred_en_best), y_test,
+                            paste0("Elastic net (alpha=", alphas[best], ", mean cutoff)")))
+
+# Optional: logistic elastic net (family = binomial) for a probability-based version
+cv_en_logit <- cv.glmnet(X_train, y_train, family = "binomial", alpha = 1, foldid = foldid)
+pred_en_logit <- as.numeric(predict(cv_en_logit, newx = X_test, s = "lambda.min", type = "response"))
+results <- rbind(results,
+                 eval_model(cut_mean(pred_en_logit), y_test, "LASSO logit (mean cutoff)"))
+```
+
+```{r}
+# PART 6. Spike and slab
+set.seed(54321)
+model1_spikeslab <- spikeslab(sobj$formula, data = sobj$data)
+print(model1_spikeslab)
+summary(model1_spikeslab)
+plot(model1_spikeslab)
+
+ss_pred  <- predict(model1_spikeslab, newdata = s_dat_test)
+ss_score <- as.numeric(ss_pred$yhat.gnet)    
+results <- rbind(results,
+                 eval_model(cut_mean(ss_score), y_test, "Spike and slab (mean cutoff)"))
+```
+
+```{r}
+# PART 7. Comparing all the models
+results_print <- results
+results_print[, c("accuracy", "recall", "precision")] <-
+  round(results_print[, c("accuracy", "recall", "precision")], 3)
+results_print
+base_rate                 
+
+# --- Do the models make the same errors? ---
+scores <- data.frame(OLS = pred_vals_lpm, Logit = pred_vals_logit,
+                     LASSO = pred1_elasnet, RF = rf_prob)
+round(cor(scores), 2)     # near 1 = models rank couples almost identically
+
+table(Logit = cut_mean(pred_vals_logit), RF = cut_mean(rf_prob))   # where they disagree
+
+# --- Simple ensemble: average the probabilities, then use the mean cutoff ---
+ens <- rowMeans(scores)
+results <- rbind(results,
+                 eval_model(cut_mean(ens), y_test, "Ensemble (OLS+Logit+LASSO+RF)"))
+tail(results, 1)
+
+# --- Which X variables matter consistently? ---
+zt <- summary(model_logit1)$coefficients
+rownames(zt) <- sub("1$", "", rownames(zt))   # "Reg_New.England1" -> "Reg_New.England"
+logit_z <- abs(zt[x_names, "z value"])
+
+lasso_c <- as.numeric(coef(cvmodel1_elasticnet, s = "lambda.min")[x_names, ])
+rf_gini <- importance(model_randFor)[x_names, "MeanDecreaseGini"]
+var_tab <- data.frame(variable = x_names,
+                      logit_abs_z = round(logit_z, 2),
+                      lasso_coef  = round(lasso_c, 4),
+                      lasso_kept  = lasso_c != 0,
+                      rf_gini     = round(rf_gini, 1),
+                      rank_logit  = rank(-logit_z),
+                      rank_rf     = rank(-rf_gini))
+var_tab[order(var_tab$rank_logit + var_tab$rank_rf), ]
+
+# --- Subgroups: accuracy for BA+ wives vs. others ---
+ba_test <- dat_test$W_educ_College == 1 | dat_test$W_educ_Advanced.degree == 1
+rbind(
+  BA_plus  = eval_model(cut_mean(pred_vals_logit)[ba_test],  y_test[ba_test],  "Logit, wife BA+"),
+  below_BA = eval_model(cut_mean(pred_vals_logit)[!ba_test], y_test[!ba_test], "Logit, wife < BA")
+)
+```
